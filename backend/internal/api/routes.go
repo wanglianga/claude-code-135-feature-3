@@ -25,6 +25,9 @@ func (s *Server) routes() {
 	m.HandleFunc("/api/adoptions/", s.requireAuth(s.handleAdoptionByID))
 	m.HandleFunc("/api/my/adoptions", s.requireAuth(s.handleMyAdoptions))
 
+	// 成熟度分批发货方案（编制/包装组确认/认养人确认/同步/归档/安排采摘工）
+	m.HandleFunc("/api/delivery-plans/", s.requireAuth(s.handleDeliveryPlanByID))
+
 	// 工单 / 赔付 / 保险
 	m.HandleFunc("/api/incidents", s.requireAuth(s.handleIncidents))
 	m.HandleFunc("/api/incidents/", s.requireAuth(s.handleIncidentByID))

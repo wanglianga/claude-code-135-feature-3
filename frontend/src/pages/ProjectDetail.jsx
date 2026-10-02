@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   get, post, KIND_EMOJI, INCIDENT_LABEL, INCIDENT_COLOR,
-  fmtMoney, fmtKg, fmtDay, fmtDate,
+  fmtMoney, fmtKg, fmtDay, fmtDate, PLAN_STATUS_LABEL,
 } from '../api'
 import { Tag, KindTag, ShipFlow, Modal, Empty, Stat, useToast } from '../components/ui'
 import { useAuth } from '../auth'
@@ -31,6 +31,7 @@ export default function ProjectDetail() {
     ['logs', `农事日志 (${d.logs.length})`],
     ['checks', `成熟度抽检 (${d.maturity_checks.length})`],
     ['harvest', `采摘·分拣·发货 (${d.shipments.length})`],
+    ['plans', `成熟度分批 (${(d.delivery_plans || []).length})`],
     ['incidents', `异常工单 (${d.incidents.length})`],
     ['delivery', '最终交付'],
   ]
@@ -82,6 +83,7 @@ export default function ProjectDetail() {
             <button className="sm" onClick={() => setAction('harvest')}>🧺 安排采摘</button>
             <button className="sm" onClick={() => setAction('sorting')}>📦 登记分拣</button>
             <button className="sm" onClick={() => setAction('shipment')}>🚚 编排发货</button>
+            <button className="sm" onClick={() => setAction({ type: 'plan', adoptions: d.adoption_list || [] })}>🍎 成熟度分批</button>
             <button className="sm" onClick={() => setAction('cost')}>💰 地块记账</button>
             <button className="sm ghost" onClick={() => setAction('live')}>🎥 开直播</button>
             {p.status !== 'completed' && <button className="sm amber" onClick={() => setAction('settle')}>✅ 季末结算</button>}
@@ -210,6 +212,10 @@ export default function ProjectDetail() {
           </div>
         )}
 
+        {tab === 'plans' && (
+          <DeliveryPlansTab d={d} canOperate={canOperate} onReload={load} />
+        )}
+
         {tab === 'incidents' && (
           <div className="grid grid-2">
             {d.incidents.map((i) => (
@@ -278,14 +284,202 @@ function DeliveryTab({ d }) {
   )
 }
 
+// ---------- 成熟度分批发货 ----------
+
+const PLAN_CLS = {
+  draft: 'gray', submitted: 'amber', pack_confirmed: 'red',
+  adopter_confirmed: 'blue', archived: 'green', cancelled: 'gray',
+}
+
+function DeliveryPlansTab({ d, canOperate, onReload }) {
+  const plans = d.delivery_plans || []
+  if (plans.length === 0) {
+    return <Empty text="本批次暂无成熟度分批方案。同一批次成熟不均时，可由农场按成熟度拆成多轮，逐轮写明预计重量与口感差异。" />
+  }
+  return (
+    <div className="grid">
+      {plans.map((pl) => <PlanManageCard key={pl.id} plan={pl} canOperate={canOperate} onReload={onReload} />)}
+    </div>
+  )
+}
+
+function PlanManageCard({ plan, canOperate, onReload }) {
+  const toast = useToast()
+  const { user } = useAuth()
+  const role = user?.role
+  const isFarmer = role === 'farmer' || role === 'admin'
+  const isPacker = role === 'packer' || isFarmer
+  const act = async (path, body) => {
+    try { await post(path, body || {}); toast('操作成功'); onReload() } catch (e) { toast(e.message, true) }
+  }
+  const total = plan.rounds.reduce((s, r) => s + Number(r.est_weight_kg || 0), 0)
+  return (
+    <div className="plan-box">
+      <div className="row">
+        <h3 style={{ margin: 0 }}>订单 #{plan.adoption_id} · {plan.adopter_name || plan.recipient_name}（{plan.shares} 份）</h3>
+        <Tag cls={PLAN_CLS[plan.status]}>{PLAN_STATUS_LABEL[plan.status] || plan.status}</Tag>
+        <span className="spacer" />
+        <span className="small muted">共 {plan.rounds.length} 轮 · 预计 {total} kg</span>
+      </div>
+      {plan.reason && <p className="small muted mt8">{plan.reason}</p>}
+      <table className="mt8">
+        <thead>
+          <tr><th>轮次</th><th>计划采摘</th><th>预计重量</th><th>口感差异</th><th>成熟度</th><th>采摘工/状态</th><th>运单状态</th></tr>
+        </thead>
+        <tbody>
+          {plan.rounds.map((r) => (
+            <tr key={r.id}>
+              <td><strong>第{r.seq}轮</strong></td>
+              <td>{fmtDay(r.planned_date)}</td>
+              <td>{r.est_weight_kg} kg</td>
+              <td className="small">{r.taste_diff}</td>
+              <td className="small muted">{r.maturity_note || '—'}</td>
+              <td className="small">
+                {r.picker_name ? `${r.picker_name}` : <span className="muted">未安排</span>}
+                {r.harvest_status === 'done' && <Tag cls="gray">已采{r.actual_kg != null ? ` ${r.actual_kg}kg` : ''}</Tag>}
+              </td>
+              <td>{r.shipment_status ? <ShipFlow status={r.shipment_status} /> : <span className="small muted">待确认</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {canOperate && (
+        <div className="row mt8">
+          {plan.status === 'draft' && isFarmer && (
+            <button className="sm" onClick={() => act(`/delivery-plans/${plan.id}/submit`)}>📤 提交采摘计划（同步包装组）</button>
+          )}
+          {plan.status === 'submitted' && isPacker && (
+            <button className="sm" onClick={() => act(`/delivery-plans/${plan.id}/pack-confirm`)}>✅ 包装组确认采摘计划</button>
+          )}
+          {plan.status === 'adopter_confirmed' && isFarmer && (
+            <button className="sm ghost" onClick={() => act(`/delivery-plans/${plan.id}/archive`)}>📦 权益归档（全部送达后）</button>
+          )}
+        </div>
+      )}
+      {canOperate && isFarmer && plan.status === 'adopter_confirmed' && (
+        <RoundPickerAssign plan={plan} onReload={onReload} />
+      )}
+    </div>
+  )
+}
+
+function RoundPickerAssign({ plan, onReload }) {
+  const toast = useToast()
+  const [rid, setRid] = useState(plan.rounds[0]?.id || '')
+  const [picker, setPicker] = useState(4)
+  const [date, setDate] = useState('')
+  const submit = async () => {
+    try {
+      await post(`/delivery-plans/${plan.id}/rounds/${rid}/picker`,
+        { picker_id: Number(picker), planned_date: date || undefined })
+      toast('已安排该轮采摘工人')
+      onReload()
+    } catch (e) { toast(e.message, true) }
+  }
+  return (
+    <div className="row mt8 small">
+      <strong>安排下一轮采摘工：</strong>
+      <select value={rid} onChange={(e) => setRid(e.target.value)}>
+        {plan.rounds.map((r) => <option key={r.id} value={r.id}>第{r.seq}轮（{r.est_weight_kg}kg）</option>)}
+      </select>
+      <input type="number" style={{ width: 110 }} placeholder="采摘工ID" value={picker} onChange={(e) => setPicker(e.target.value)} />
+      <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      <button className="sm" onClick={submit}>安排</button>
+      <span className="muted">默认采摘工 赵秀兰(ID 4)；采摘计划随分轮同步到包装组。</span>
+    </div>
+  )
+}
+
 // ---------- 操作弹窗 ----------
+function PlanCreateForm({ projectId, adoptions, onDone, onClose }) {
+  const toast = useToast()
+  const [adoptionId, setAdoptionId] = useState(adoptions[0]?.id || '')
+  const [reason, setReason] = useState('')
+  const [rounds, setRounds] = useState([
+    { planned_date: '', est_weight_kg: '', taste_diff: '', maturity_note: '', pack_spec: '', cold_route: '' },
+    { planned_date: '', est_weight_kg: '', taste_diff: '', maturity_note: '', pack_spec: '', cold_route: '' },
+  ])
+  const setR = (i, k, v) => setRounds(rounds.map((r, idx) => idx === i ? { ...r, [k]: v } : r))
+  const addRound = () => setRounds([...rounds, { planned_date: '', est_weight_kg: '', taste_diff: '', maturity_note: '', pack_spec: '', cold_route: '' }])
+  const total = rounds.reduce((s, r) => s + Number(r.est_weight_kg || 0), 0)
+
+  const submit = async () => {
+    if (!adoptionId) { toast('请选择认养订单', true); return }
+    if (rounds.length < 2) { toast('至少 2 轮发货', true); return }
+    for (let i = 0; i < rounds.length; i++) {
+      if (!(Number(rounds[i].est_weight_kg) > 0)) { toast(`第${i + 1}轮预计重量必填`, true); return }
+      if (!rounds[i].taste_diff.trim()) { toast(`第${i + 1}轮需说明口感差异`, true); return }
+    }
+    try {
+      await post(`/projects/${projectId}/delivery-plans`, {
+        adoption_id: Number(adoptionId),
+        reason,
+        rounds: rounds.map((r, i) => ({
+          seq: i + 1,
+          est_weight_kg: Number(r.est_weight_kg),
+          taste_diff: r.taste_diff,
+          maturity_note: r.maturity_note,
+          planned_date: r.planned_date,
+          pack_spec: r.pack_spec,
+          cold_route: r.cold_route,
+        })),
+      })
+      toast('方案已编制（编制中），提交后将同步包装组确认')
+      onDone(); onClose()
+    } catch (e) { toast(e.message, true) }
+  }
+
+  return (
+    <>
+      <p className="muted small">同一认养批次成熟不均时，按成熟度拆成多轮采摘发货，逐轮写明预计重量与口感差异；认养人确认后自动同步物流计划、采摘任务与权益核算。</p>
+      <label>认养订单</label>
+      <select value={adoptionId} onChange={(e) => setAdoptionId(e.target.value)}>
+        {adoptions.length === 0 && <option value="">（暂无可选订单）</option>}
+        {adoptions.map((a) => (
+          <option key={a.id} value={a.id}>订单#{a.id} · {a.recipient_name}（{a.shares}份 · {a.status}）</option>
+        ))}
+      </select>
+      <label>成熟不均情况说明</label>
+      <textarea rows="2" value={reason} onChange={(e) => setReason(e.target.value)}
+        placeholder="如：阳面果已上糖全红，内膛果尚青，为保证各轮赏味期拆分发货" />
+      <div className="row mt8"><strong>发货轮次</strong><span className="spacer" />
+        <span className="small muted">合计预计 {total} kg</span>
+        <button className="sm ghost" onClick={addRound}>＋ 增加一轮</button>
+      </div>
+      {rounds.map((r, i) => (
+        <div key={i} className="plan-round-edit mt8">
+          <div className="row"><strong>第 {i + 1} 轮</strong><span className="spacer" />
+            {rounds.length > 2 && <button className="sm ghost" onClick={() => setRounds(rounds.filter((_, idx) => idx !== i))}>删除</button>}
+          </div>
+          <div className="grid grid-3">
+            <div><label>计划采摘日期</label><input type="date" value={r.planned_date} onChange={(e) => setR(i, 'planned_date', e.target.value)} /></div>
+            <div><label>预计重量 kg</label><input type="number" value={r.est_weight_kg} onChange={(e) => setR(i, 'est_weight_kg', e.target.value)} /></div>
+            <div><label>包装规格</label><input value={r.pack_spec} onChange={(e) => setR(i, 'pack_spec', e.target.value)} placeholder="精品大果80-85mm/12枚" /></div>
+          </div>
+          <label>口感差异（糖度/脆面/香气）</label>
+          <input value={r.taste_diff} onChange={(e) => setR(i, 'taste_diff', e.target.value)}
+            placeholder="如：糖度约14.5%，脆甜多汁、着色≥90%、果香最浓" />
+          <label>成熟度说明</label>
+          <input value={r.maturity_note} onChange={(e) => setR(i, 'maturity_note', e.target.value)}
+            placeholder="如：淀粉染色1-2级已全熟，先采阳面树冠" />
+          <label>冷链路线</label>
+          <input value={r.cold_route} onChange={(e) => setR(i, 'cold_route', e.target.value)}
+            placeholder="烟台-济南分拨-杭州（全程0-4℃）" />
+        </div>
+      ))}
+      <div className="mt16"><button onClick={submit}>编制方案</button></div>
+    </>
+  )
+}
+
 function ActionModal({ kind, projectId, onClose, onDone }) {
   const toast = useToast()
   const simple = typeof kind === 'string'
   const type = simple ? kind : kind.type
   const titles = {
     log: '记录农事 / 灾害', check: '成熟度抽检', harvest: '安排采摘任务', sorting: '登记分拣',
-    shipment: '编排序批发货', cost: '地块记账', live: '创建直播', settle: '季末结算',
+    shipment: '编排序批发货', plan: '按成熟度编制多轮发货', cost: '地块记账', live: '创建直播', settle: '季末结算',
   }
   const [f, setF] = useState({})
   const set = (k, v) => setF({ ...f, [k]: v })
@@ -300,7 +494,10 @@ function ActionModal({ kind, projectId, onClose, onDone }) {
     }
   }
   return (
-    <Modal title={titles[type] || '操作'} onClose={onClose}>
+    <Modal title={titles[type] || '操作'} onClose={onClose} wide={type === 'plan'}>
+      {type === 'plan' && (
+        <PlanCreateForm projectId={projectId} adoptions={kind.adoptions || []} onDone={onDone} onClose={onClose} />
+      )}
       {type === 'log' && (
         <>
           <label>类型</label>
@@ -394,7 +591,7 @@ function ActionModal({ kind, projectId, onClose, onDone }) {
           <textarea rows="4" onChange={(e) => set('summary', e.target.value)} placeholder="如：本季受冰雹影响…建议增设防雹网、上线净重磅识模板…" />
         </>
       )}
-      {type !== 'ship_advance' && <div className="mt16"><button onClick={submit}>提交</button></div>}
+      {type !== 'ship_advance' && type !== 'plan' && <div className="mt16"><button onClick={submit}>提交</button></div>}
     </Modal>
   )
 }

@@ -157,19 +157,30 @@ func (s *Server) handleMyAdoptions(w http.ResponseWriter, r *http.Request) {
 		cbs, _ := s.queryRows(r.Context(),
 			`SELECT * FROM callbacks WHERE adoption_id=$1`, aid)
 
+		var deliveredKg, inTransitKg, pendingKg float64
 		var shipped, plannedKg float64
 		allDelivered := len(ships) > 0
 		for _, sh := range ships {
 			if v, ok := sh["weight_kg"].(float64); ok {
 				st, _ := sh["status"].(string)
-				if st == "planned" {
-					plannedKg += v
-					allDelivered = false
-				} else {
+				switch st {
+				case "delivered":
+					deliveredKg += v
 					shipped += v
-					if st != "delivered" {
-						allDelivered = false
-					}
+				case "shipped":
+					inTransitKg += v
+					shipped += v
+				case "planned":
+					plannedKg += v
+					pendingKg += v
+					allDelivered = false
+				default: // picked / packed：已采待发
+					pendingKg += v
+					shipped += v
+					allDelivered = false
+				}
+				if st != "delivered" {
+					allDelivered = false
 				}
 			} else {
 				allDelivered = false
@@ -210,11 +221,16 @@ func (s *Server) handleMyAdoptions(w http.ResponseWriter, r *http.Request) {
 		}
 		fair := shipped+compKg >= need-0.01
 		projectedFair := shipped+plannedKg+compKg >= need-0.01
+		balance := maxF(need-deliveredKg-compKg, 0)
 		fulfilled := map[string]interface{}{
 			"stage":                stage,
 			"guarantee_kg":         need,
 			"shipped_kg":           shipped,
 			"planned_kg":           plannedKg,
+			"delivered_kg":         deliveredKg,
+			"in_transit_kg":        inTransitKg,
+			"pending_kg":           pendingKg,
+			"remaining_kg":         roundF(balance, 2),
 			"shortage_kg":          maxF(need-shipped-plannedKg-compKg, 0),
 			"compensated_amount":   compAmount,
 			"compensated_kg_equiv": roundF(compKg, 2),
@@ -222,9 +238,22 @@ func (s *Server) handleMyAdoptions(w http.ResponseWriter, r *http.Request) {
 			"projected_fair":       projectedFair,
 		}
 
+		// 成熟度分批发货方案与权益台账（已发/在途/待发/权益余额、归档状态）
+		planRows, _ := s.queryRows(r.Context(),
+			`SELECT id FROM delivery_plans WHERE adoption_id=$1 ORDER BY id`, aid)
+		plans := make([]map[string]interface{}, 0, len(planRows))
+		for _, pr := range planRows {
+			if pid, ok := asID(pr["id"]); ok {
+				if d, e := s.planDetail(r.Context(), pid); e == nil {
+					plans = append(plans, d)
+				}
+			}
+		}
+
 		row["shipments"] = ships
 		row["compensations"] = comps
 		row["callbacks"] = cbs
+		row["delivery_plans"] = plans
 		row["rights_fulfillment"] = fulfilled
 		result = append(result, row)
 	}

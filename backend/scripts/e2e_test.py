@@ -52,9 +52,13 @@ st, projs = call("GET", "/api/projects")
 check("公开浏览 5 个认养项目", st == 200 and len(projs) == 5, len(projs))
 st, p1 = call("GET", "/api/projects/1")
 need_keys = {"project", "logs", "maturity_checks", "harvest_tasks", "sorting",
-             "shipments", "incidents", "insurance_claims", "settlement"}
+             "shipments", "incidents", "insurance_claims", "settlement", "delivery_plans"}
 check("项目详情聚合全链路", need_keys.issubset(p1.keys()), p1.keys())
 check("项目农事日志含冰雹", any("冰雹" in l.get("title", "") for l in p1["logs"]))
+check("项目详情含成熟度分批方案与轮次口感差异",
+      len(p1["delivery_plans"]) >= 1 and
+      all(any(r.get("taste_diff") for r in pl["rounds"]) for pl in p1["delivery_plans"]),
+      p1["delivery_plans"])
 st, live = call("GET", "/api/live")
 check("农场直播公开可见", any("红富士" in x["title"] for x in live))
 st, charity = call("GET", "/api/charity")
@@ -148,6 +152,171 @@ st, r = call("POST", f"/api/projects/5/shipments/{sid}/advance", T["logistics"],
 check("物流确认送达", st == 200 and r["status"] == "delivered", r)
 st, ad = call("GET", f"/api/adoptions/{new_aid}", T["adopter2"])
 check("全部送达后订单自动完成", ad["status"] == "completed", ad)
+
+# ==================== 成熟度分批发货（完整链路） ====================
+# 吴琳(adopter2) 新认养稻田 1 份（保底30kg），农场按成熟度拆成 2 轮，逐轮写明重量与口感差异
+st, r = call("POST", "/api/adoptions", T["adopter2"], {
+    "project_id": 4, "shares": 1, "recipient_name": "吴琳", "phone": "13900000008",
+    "address": "杭州市西湖区文三路478号"})
+check("成熟度分批：吴琳新认养稻田1份", st == 201 and r["cert_no"].startswith("CERT-RICE-2026-A"), r)
+rice_aid = r["adoption"]["id"]
+
+def my_order(aid):
+    st, mine = call("GET", "/api/my/adoptions", T["adopter2"])
+    return next(a for a in mine if a["id"] == aid)
+
+o0 = my_order(rice_aid)
+check("权益核对含已送达/在途/待发/余额字段",
+      all(k in o0["rights_fulfillment"] for k in
+          ["delivered_kg", "in_transit_kg", "pending_kg", "remaining_kg"]), o0["rights_fulfillment"])
+check("期初保底30kg、余额30、暂无分批方案",
+      o0["rights_fulfillment"]["guarantee_kg"] == 30 and
+      o0["rights_fulfillment"]["remaining_kg"] == 30 and o0["delivery_plans"] == [], o0["rights_fulfillment"])
+
+ROUNDS = [
+    {"seq": 1, "est_weight_kg": 20, "taste_diff": "首批稻穗金黄饱满、新米清香有嚼劲",
+     "maturity_note": "主田块先熟，10月10日开镰", "planned_date": "2026-10-10",
+     "pack_spec": "稻花香2号 10kg袋装", "cold_route": "烟台-杭州普通快运"},
+    {"seq": 2, "est_weight_kg": 10, "taste_diff": "边角后熟田，米质略糯、适合煮粥",
+     "maturity_note": "边角低洼成熟晚4天", "planned_date": "2026-10-14",
+     "pack_spec": "稻花香2号 5kg袋装×2", "cold_route": "烟台-杭州普通快运"},
+]
+# 认养人不能编制方案
+st, _ = call("POST", "/api/projects/4/delivery-plans", T["adopter2"],
+             {"adoption_id": rice_aid, "rounds": ROUNDS})
+check("认养人不能编制分批方案(403)", st == 403)
+# 校验：至少2轮、必须写口感差异
+st, r = call("POST", "/api/projects/4/delivery-plans", T["farmer"],
+             {"adoption_id": rice_aid, "rounds": [ROUNDS[0]]})
+check("单轮方案被拒(至少2轮)", st == 400, r)
+bad_rounds = [dict(ROUNDS[0]), dict(ROUNDS[1], taste_diff="")]
+st, r = call("POST", "/api/projects/4/delivery-plans", T["farmer"],
+             {"adoption_id": rice_aid, "rounds": bad_rounds})
+check("缺少口感差异被拒", st == 400 and "口感" in r.get("error", ""), r)
+
+st, r = call("POST", "/api/projects/4/delivery-plans", T["farmer"],
+             {"adoption_id": rice_aid, "reason": "稻田边角低洼成熟晚4天，拆两轮收割", "rounds": ROUNDS})
+check("农场编制2轮成熟度分批方案", st == 201 and r["round_count"] == 2 and r["total_weight_kg"] == 30, r)
+plan_id = r["plan"]["id"]
+check("方案初态=draft，轮次含预计重量与口感",
+      r["plan"]["status"] == "draft" and
+      r["plan"]["rounds"][0]["est_weight_kg"] == 20 and "清香" in r["plan"]["rounds"][0]["taste_diff"], r["plan"])
+check("编制即生成期初保底权益台账",
+      any(x["kind"] == "opening" and x["balance_kg"] == 30 for x in r["plan"]["rights_records"]),
+      r["plan"]["rights_records"])
+
+# 顺序与角色：采摘工/包装员不能提交，draft 不能被包装组直接确认/被认养人确认
+st, _ = call("POST", f"/api/delivery-plans/{plan_id}/submit", T["picker"], {})
+check("采摘工不能提交采摘计划(403)", st == 403)
+st, _ = call("POST", f"/api/delivery-plans/{plan_id}/submit", T["packer"], {})
+check("包装员不能提交采摘计划(403)", st == 403)
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/pack-confirm", T["packer"], {})
+check("未提交不能包装确认(409)", st == 409, r)
+st, _ = call("POST", f"/api/delivery-plans/{plan_id}/confirm", T["adopter2"], {})
+check("包装组未确认前认养人不能确认(409)", st == 409)
+
+# 农场提交 → 采摘计划同步包装组
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/submit", T["farmer"], {})
+check("农场提交，采摘计划同步包装组", st == 200 and r["status"] == "submitted", r)
+# 包装组确认采摘计划
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/pack-confirm", T["packer"], {})
+check("包装组确认采摘计划", st == 200 and r["status"] == "pack_confirmed", r)
+# 非本人认养人不能确认
+st, _ = call("POST", f"/api/delivery-plans/{plan_id}/confirm", T["adopter"], {})
+check("非本单认养人不能确认(403)", st == 403)
+# 认养人确认 → 物流计划 / 采摘任务 / 权益核算同步
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/confirm", T["adopter2"], {"note": "同意分两轮"})
+check("认养人确认后同步2运单+2采摘任务",
+      st == 200 and r["round_count"] == 2 and
+      all(x["shipment_id"] and x["harvest_task_id"] for x in r["plan"]["rounds"]), r)
+check("确认后生成两轮排产权益流水",
+      sum(1 for x in r["plan"]["rights_records"] if x["kind"] == "allocation") == 2,
+      r["plan"]["rights_records"])
+
+o1 = my_order(rice_aid)
+rs1 = next(p for p in o1["delivery_plans"] if p["id"] == plan_id)["rights_summary"]
+check("确认后：待发30kg、在途0、已送0、余额30",
+      rs1["pending_kg"] == 30 and rs1["in_transit_kg"] == 0 and
+      rs1["delivered_kg"] == 0 and rs1["remaining_kg"] == 30, rs1)
+
+def plan_detail(tok= None):
+    tok = tok or T["farmer"]
+    st, d = call("GET", f"/api/delivery-plans/{plan_id}", tok)
+    assert st == 200, d
+    return d
+
+d = plan_detail()
+r1, r2 = sorted(d["rounds"], key=lambda x: x["seq"])
+# 农场据轮次安排下一次采摘工人
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/rounds/{r1['id']}/picker", T["farmer"],
+             {"picker_id": 4})
+check("为第1轮安排采摘工赵秀兰", st == 200 and r["harvest_task"]["picker_id"] == 4, r)
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/rounds/{r2['id']}/picker", T["farmer"],
+             {"picker_id": 6})
+check("指派非采摘工账号被拒(400)", st == 400, r)
+st, _ = call("POST", f"/api/delivery-plans/{plan_id}/rounds/{r2['id']}/picker", T["adopter2"],
+             {"picker_id": 4})
+check("认养人不能安排采摘工(403)", st == 403)
+
+def fulfill_round(rnd, actual):
+    # 采摘工回填 → 运单 picked/packed/shipped/delivered
+    call("POST", f"/api/projects/4/harvests/{rnd['harvest_task_id']}/complete", T["picker"],
+         {"actual_kg": actual, "bad_rate_pct": 1.0})
+    sid = rnd["shipment_id"]
+    for stt in ("picked", "packed"):
+        call("POST", f"/api/projects/4/shipments/{sid}/advance", T["farmer"], {"status": stt})
+    call("POST", f"/api/projects/4/shipments/{sid}/advance", T["logistics"],
+         {"status": "shipped", "logistics_company": "顺丰快运", "tracking_no": f"SFRICE-{rnd['seq']}"})
+    st, rr = call("POST", f"/api/projects/4/shipments/{sid}/advance", T["logistics"],
+                  {"status": "delivered"})
+    return st, rr
+
+# 第1轮 20kg 发车→送达
+d2 = plan_detail()
+rd1 = next(x for x in d2["rounds"] if x["seq"] == 1)
+st, _ = fulfill_round(rd1, 20)
+check("第1轮运单送达", st == 200)
+d3 = plan_detail(T["adopter2"])
+rs_after1 = d3["rights_summary"]
+kinds_after1 = [x["kind"] for x in d3["rights_records"]]
+check("第1轮后：已送20、待发10、权益余额10",
+      rs_after1["delivered_kg"] == 20 and rs_after1["pending_kg"] == 10 and
+      rs_after1["remaining_kg"] == 10, rs_after1)
+check("发车/送达写入权益流水", "dispatch" in kinds_after1 and "delivery" in kinds_after1, kinds_after1)
+# 还有一轮未送达，归档被拦截
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/archive", T["farmer"], {})
+check("未全部送达不能归档(409)", st == 409 and "未送达" in r.get("error", ""), r)
+
+# 第2轮 10kg 安排工人、采摘、送达 → 余额0
+d4 = plan_detail()
+rd2 = next(x for x in d4["rounds"] if x["seq"] == 2)
+call("POST", f"/api/delivery-plans/{plan_id}/rounds/{rd2['id']}/picker", T["farmer"], {"picker_id": 4})
+st, _ = fulfill_round(rd2, 10)
+check("第2轮运单送达", st == 200)
+d5 = plan_detail(T["adopter2"])
+check("两轮全部送达后权益余额为0", d5["rights_summary"]["remaining_kg"] == 0
+      and d5["rights_summary"]["delivered_kg"] == 30, d5["rights_summary"])
+# 权益归档
+st, r = call("POST", f"/api/delivery-plans/{plan_id}/archive", T["farmer"],
+             {"archive_note": "两轮新米全部送达，权益兑现完毕"})
+check("全部送达后权益归档", st == 200 and r["status"] == "archived", r)
+d6 = plan_detail(T["adopter2"])
+check("归档后台账含 archive 流水且标记已归档",
+      any(x["kind"] == "archive" and x["archived"] for x in d6["rights_records"]), d6["status"])
+
+# 种子已归档方案（陈曦蓝莓订单4）在我的认养中可见
+st, mine_cx = call("GET", "/api/my/adoptions", T["adopter"])
+berry = next(a for a in mine_cx if a["id"] == 4)
+check("种子蓝莓方案已归档并对认养人可见",
+      any(p["status"] == "archived" for p in berry["delivery_plans"]), berry.get("delivery_plans"))
+# 种子吴琳苹果方案1（pack_confirmed）在吴琳“我的认养”中等待确认
+st, mine_wl = call("GET", "/api/my/adoptions", T["adopter2"])
+apple3 = next(a for a in mine_wl if a["id"] == 3)
+check("种子苹果3轮方案待吴琳确认，逐轮展示重量与口感差异",
+      any(p["status"] == "pack_confirmed" and len(p["rounds"]) == 3 and
+          all(x["taste_diff"] for x in p["rounds"]) for p in apple3["delivery_plans"]),
+      apple3.get("delivery_plans"))
+
 
 # ---- 坏果投诉：多角色处理流水串到同一工单 ----
 st, r = call("POST", "/api/incidents", T["adopter2"], {

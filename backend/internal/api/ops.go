@@ -260,6 +260,9 @@ func (s *Server) projectSubresource(w http.ResponseWriter, r *http.Request, id i
 		}
 		writeJSON(w, 201, row)
 
+	case "delivery-plans":
+		s.handleProjectDeliveryPlans(w, r, id, batchNo, ownFarm)
+
 	case "costs":
 		if r.Method != http.MethodPost {
 			writeErr(w, 405, "方法不允许")
@@ -426,6 +429,8 @@ func (s *Server) advanceShipment(w http.ResponseWriter, r *http.Request, project
 		writeErr(w, 400, "推进失败："+err.Error())
 		return
 	}
+	// 成熟度分批发货：发车/送达同步写入认养人权益台账（已发/在途/权益余额）
+	s.recordShipmentRights(r.Context(), shipID, to, u.ID)
 	// 全部运单送达后，订单自动完成
 	if to == "delivered" {
 		_, _ = s.Pool.Exec(r.Context(), `

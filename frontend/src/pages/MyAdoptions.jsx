@@ -1,10 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { get, post, KIND_EMOJI, fmtMoney, fmtKg, fmtDay, fmtDate, SHIP_STATUS_LABEL } from '../api'
+import { get, post, KIND_EMOJI, fmtMoney, fmtKg, fmtDay, fmtDate, SHIP_STATUS_LABEL, PLAN_STATUS_LABEL } from '../api'
 import { Tag, ShipFlow, Modal, Empty, Stat, useToast } from '../components/ui'
 
 const ORDER_STATUS = { paid: '待发货', shipping: '履约中', completed: '已完成', refunded: '已退款' }
 const COMP_LABEL = { cash: '现金赔付', reship: '补发', insurance: '保险赔付', credit: '下季抵扣' }
 const COMP_CLS = { cash: 'red', reship: 'amber', insurance: 'teal', credit: 'purple' }
+const PLAN_CLS = {
+  draft: 'gray', submitted: 'amber', pack_confirmed: 'red',
+  adopter_confirmed: 'blue', archived: 'green', cancelled: 'gray',
+}
+const RIGHTS_KIND_LABEL = {
+  opening: '期初保底', allocation: '排产同步', dispatch: '冷链发车',
+  delivery: '送达兑现', compensation: '赔付折算', archive: '权益归档',
+}
 
 export default function MyAdoptions() {
   const [list, setList] = useState([])
@@ -46,10 +54,16 @@ export default function MyAdoptions() {
 
                 <div className="grid grid-4 mt16">
                   <Stat label="保底产量" value={fmtKg(rf.guarantee_kg)} />
-                  <Stat label="已收到" value={fmtKg(rf.shipped_kg)} cls="blue" />
-                  <Stat label="在途/待发" value={fmtKg(rf.planned_kg)} cls="amber" />
+                  <Stat label="已送达" value={fmtKg(rf.delivered_kg)} cls="blue" />
+                  <Stat label="在途" value={fmtKg(rf.in_transit_kg)} cls="amber" />
+                  <Stat label="待发" value={fmtKg(rf.pending_kg)} cls="amber" />
                   <Stat label="赔付折算" value={fmtKg(rf.compensated_kg_equiv)} cls={rf.compensated_kg_equiv > 0 ? 'red' : ''} />
+                  <Stat label="权益余额（待兑现）" value={fmtKg(rf.remaining_kg)} cls={rf.remaining_kg > 0.01 ? 'red' : 'green'} />
                 </div>
+
+                {(a.delivery_plans || []).map((pl) => (
+                  <DeliveryPlanCard key={pl.id} plan={pl} onReload={load} />
+                ))}
 
                 <div className="grid grid-2 mt16">
                   <div>
@@ -120,6 +134,130 @@ export default function MyAdoptions() {
       {focus === 'callback' && cur && <CallbackModal adoption={cur} onClose={() => setFocus(null)} onDone={load} />}
       {focus === 'cert' && cur && <CertModal adoption={cur} onClose={() => setFocus(null)} />}
     </>
+  )
+}
+
+function DeliveryPlanCard({ plan, onReload }) {
+  const toast = useToast()
+  const [confirming, setConfirming] = useState(false)
+  const confirm = async (note) => {
+    try {
+      await post(`/delivery-plans/${plan.id}/confirm`, { note })
+      toast('已确认分批发货，物流计划与权益核算已同步更新')
+      setConfirming(false)
+      onReload()
+    } catch (e) { toast(e.message, true) }
+  }
+  return (
+    <div className="plan-box mt16">
+      <div className="row">
+        <h3 style={{ margin: 0 }}>🍎 成熟度分批发货</h3>
+        <Tag cls={PLAN_CLS[plan.status]}>{PLAN_STATUS_LABEL[plan.status] || plan.status}</Tag>
+        <span className="spacer" />
+        {plan.archived_at
+          ? <Tag cls="green">📦 已归档 · {fmtDay(plan.archived_at)}</Tag>
+          : plan.status === 'adopter_confirmed' && <span className="small muted">权益逐轮同步，全部送达后归档</span>}
+      </div>
+      {plan.reason && <p className="small muted mt8">{plan.reason}</p>}
+      <table className="mt8">
+        <thead>
+          <tr><th>轮次</th><th>计划采摘</th><th>预计重量</th><th>口感差异</th><th>成熟度说明</th><th>发货状态</th></tr>
+        </thead>
+        <tbody>
+          {plan.rounds.map((r) => (
+            <tr key={r.id}>
+              <td><strong>第{r.seq}轮</strong></td>
+              <td className="small">{fmtDay(r.planned_date)}</td>
+              <td>{r.est_weight_kg} kg</td>
+              <td className="small">{r.taste_diff}</td>
+              <td className="small muted">{r.maturity_note || '—'}</td>
+              <td>{r.shipment_status ? <ShipFlow status={r.shipment_status} /> : <span className="small muted">待确认排产</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {plan.status === 'pack_confirmed' && (
+        <div className="plan-confirm-bar mt8">
+          <span className="small">包装组已确认采摘计划，请核对每轮<strong>预计重量</strong>与<strong>口感差异</strong>后确认。</span>
+          <button onClick={() => setConfirming(true)}>确认分批发货方案</button>
+        </div>
+      )}
+
+      {plan.status === 'adopter_confirmed' && (
+        <RightsLedger plan={plan} />
+      )}
+      {plan.status === 'archived' && (
+        <div className="small muted mt8">📦 {plan.archive_note || '保底权益已全部兑现，权益台账归档。'}</div>
+      )}
+
+      {confirming && <PlanConfirmModal plan={plan} onCancel={() => setConfirming(false)} onConfirm={confirm} />}
+    </div>
+  )
+}
+
+function RightsLedger({ plan }) {
+  const rs = plan.rights_summary || {}
+  const records = plan.rights_records || []
+  return (
+    <div className="mt8">
+      <div className="grid grid-4">
+        <Stat label="保底" value={fmtKg(rs.guarantee_kg)} />
+        <Stat label="已送达" value={fmtKg(rs.delivered_kg)} cls="blue" />
+        <Stat label="在途" value={fmtKg(rs.in_transit_kg)} cls="amber" />
+        <Stat label="待发" value={fmtKg(rs.pending_kg)} cls="amber" />
+        <Stat label="权益余额" value={fmtKg(rs.remaining_kg)} cls={rs.remaining_kg > 0.01 ? 'red' : 'green'} />
+      </div>
+      <details className="mt8">
+        <summary className="small muted" style={{ cursor: 'pointer' }}>查看权益同步流水（{records.length}）</summary>
+        <table className="mt8">
+          <thead><tr><th>类型</th><th>变动</th><th>余额</th><th>说明</th><th>时间</th></tr></thead>
+          <tbody>
+            {records.map((r) => (
+              <tr key={r.id}>
+                <td><Tag>{RIGHTS_KIND_LABEL[r.kind] || r.kind}</Tag></td>
+                <td>{r.change_kg ? (r.change_kg > 0 ? '+' : '') + r.change_kg + ' kg' : '—'}</td>
+                <td><strong>{fmtKg(r.balance_kg)}</strong></td>
+                <td className="small muted">{r.note}</td>
+                <td className="small muted">{fmtDate(r.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </details>
+    </div>
+  )
+}
+
+function PlanConfirmModal({ plan, onCancel, onConfirm }) {
+  const [note, setNote] = useState('')
+  const total = plan.rounds.reduce((s, r) => s + Number(r.est_weight_kg || 0), 0)
+  return (
+    <Modal title={`确认成熟度分批发货 · ${plan.project_title}`} onClose={onCancel} wide>
+      <p className="muted small">{plan.reason}</p>
+      <table>
+        <thead><tr><th>轮次</th><th>计划采摘</th><th>预计重量</th><th>口感差异 / 成熟度</th><th>包装规格·冷链</th></tr></thead>
+        <tbody>
+          {plan.rounds.map((r) => (
+            <tr key={r.id}>
+              <td><strong>第{r.seq}轮</strong></td>
+              <td>{fmtDay(r.planned_date)}</td>
+              <td><strong>{r.est_weight_kg} kg</strong></td>
+              <td className="small">{r.taste_diff}<br /><span className="muted">{r.maturity_note}</span></td>
+              <td className="small muted">{r.pack_spec || '—'}<br />{r.cold_route}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt8">合计预计 <strong>{total} kg</strong>。确认后农场将据此安排每一轮的采摘工人，物流计划与你的权益余额会逐轮同步。</p>
+      <label>给农场留言（选填）</label>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：末轮帮我催熟几天再发" />
+      <div className="row mt16">
+        <button className="ghost" onClick={onCancel}>再想想</button>
+        <span className="spacer" />
+        <button onClick={() => onConfirm(note)}>确认，按此分轮发货</button>
+      </div>
+    </Modal>
   )
 }
 

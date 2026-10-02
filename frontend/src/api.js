@@ -83,6 +83,16 @@ export const SHIP_STATUS_LABEL = {
 }
 export const SHIP_STATUS_FLOW = ['planned', 'picked', 'packed', 'shipped', 'delivered']
 
+// 成熟度分批发货方案状态
+export const PLAN_STATUS_LABEL = {
+  draft: '编制中',
+  submitted: '待包装组确认',
+  pack_confirmed: '待认养人确认',
+  adopter_confirmed: '认养人已确认·履约中',
+  archived: '权益已归档',
+  cancelled: '已取消',
+}
+
 export function fmtMoney(v) {
   if (v === null || v === undefined) return '—'
   return '¥' + Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })

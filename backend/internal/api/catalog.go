@@ -402,10 +402,33 @@ func (s *Server) projectDetail(w http.ResponseWriter, r *http.Request, id int64)
 		`SELECT * FROM charity_adoptions WHERE project_id=$1 ORDER BY created_at`, id)
 	groupBuys, _ := s.queryRows(ctx,
 		`SELECT * FROM group_buys WHERE project_id=$1 ORDER BY created_at`, id)
+	// 认养订单列表仅本农场/管理员可见（供编制分批发货方案选择订单），公开浏览不暴露收货人
+	var adoptionList []map[string]interface{}
+	if cu, ok := s.authenticate(w, r, false); ok && cu != nil {
+		if cu.Role == "admin" || (cu.FarmID != nil && *cu.FarmID == asID64(p["farm_id"])) {
+			adoptionList, _ = s.queryRows(ctx,
+				`SELECT a.id, a.recipient_name, a.shares, a.status, u.name AS user_name
+				 FROM adoptions a JOIN users u ON u.id=a.user_id
+				 WHERE a.project_id=$1 ORDER BY a.id`, id)
+		}
+	}
 	settlements, _ := s.queryRows(ctx,
 		`SELECT * FROM settlements WHERE project_id=$1`, id)
 	live, _ := s.queryRows(ctx,
 		`SELECT * FROM live_streams WHERE project_id=$1 ORDER BY starts_at DESC`, id)
+	planIDs, _ := s.queryRows(ctx,
+		`SELECT id FROM delivery_plans WHERE project_id=$1 ORDER BY id`, id)
+	deliveryPlans := make([]map[string]interface{}, 0, len(planIDs))
+	for _, r0 := range planIDs {
+		if pid, ok := asID(r0["id"]); ok {
+			if d, e := s.planDetail(ctx, pid); e == nil {
+				// 项目详情公开可读：展示分轮安排与确认状态，隐藏权益金额/台账明细
+				delete(d, "rights_records")
+				delete(d, "rights_summary")
+				deliveryPlans = append(deliveryPlans, d)
+			}
+		}
+	}
 	var settlement interface{}
 	if len(settlements) > 0 {
 		settlement = settlements[0]
@@ -433,7 +456,9 @@ func (s *Server) projectDetail(w http.ResponseWriter, r *http.Request, id int64)
 		"insurance_claims": claims,
 		"charity":          charity,
 		"group_buys":       groupBuys,
+		"adoption_list":    adoptionList,
 		"live_streams":     live,
+		"delivery_plans":   deliveryPlans,
 		"settlement":       settlement,
 		"sum_harvested":    harvested,
 		"sum_shipped":      shipped,
