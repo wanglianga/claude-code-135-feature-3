@@ -33,6 +33,12 @@ func (s *Server) projectSubresource(w http.ResponseWriter, r *http.Request, id i
 			s.completeHarvest(w, r, id, subID, ownFarm)
 		case parts[0] == "shipments" && parts[2] == "advance":
 			s.advanceShipment(w, r, id, subID, ownFarm)
+		case parts[0] == "round-plans" && parts[2] == "confirm":
+			s.handleRoundConfirm(w, r, id, subID, false)
+		case parts[0] == "round-plans" && parts[2] == "reject":
+			s.handleRoundConfirm(w, r, id, subID, true)
+		case parts[0] == "harvest-plans" && parts[2] == "confirm":
+			s.handleHarvestPlanConfirm(w, r, id, subID, ownFarm)
 		default:
 			writeErr(w, 404, "未知操作")
 		}
@@ -260,6 +266,14 @@ func (s *Server) projectSubresource(w http.ResponseWriter, r *http.Request, id i
 		}
 		writeJSON(w, 201, row)
 
+	case "round-plans":
+		// POST 成熟度分批发货方案（平台/农场拆多轮，说明每轮重量与口感差异）
+		s.handleRoundPlans(w, r, id, batchNo, ownFarm)
+
+	case "harvest-plans":
+		// POST 农场据分轮方案安排下一次采摘工人，采摘计划同步包装组确认
+		s.handleHarvestPlansSub(w, r, id, batchNo, ownFarm)
+
 	case "costs":
 		if r.Method != http.MethodPost {
 			writeErr(w, 405, "方法不允许")
@@ -426,13 +440,20 @@ func (s *Server) advanceShipment(w http.ResponseWriter, r *http.Request, project
 		writeErr(w, 400, "推进失败："+err.Error())
 		return
 	}
-	// 全部运单送达后，订单自动完成
+	// 全部运单送达后，订单自动完成；每次推进都把权益余额同步给认养人
+	var shipAdoption int64
+	_ = s.Pool.QueryRow(r.Context(), `SELECT COALESCE(adoption_id,0) FROM shipments WHERE id=$1`, shipID).Scan(&shipAdoption)
 	if to == "delivered" {
 		_, _ = s.Pool.Exec(r.Context(), `
 			UPDATE adoptions a SET status='completed'
 			WHERE id=(SELECT adoption_id FROM shipments WHERE id=$1)
 			  AND NOT EXISTS (SELECT 1 FROM shipments
 			                  WHERE adoption_id=a.id AND status<>'delivered')`, shipID)
+	}
+	if shipAdoption != 0 {
+		if e := s.recomputeRightsArchive(r.Context(), shipAdoption); e != nil {
+			fmt.Println("recompute rights error:", e)
+		}
 	}
 	writeJSON(w, 200, row)
 }

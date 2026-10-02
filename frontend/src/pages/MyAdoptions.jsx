@@ -10,13 +10,27 @@ export default function MyAdoptions() {
   const [list, setList] = useState([])
   const [focus, setFocus] = useState(null) // address / callback / cert
   const [cur, setCur] = useState(null)
+  const [busy, setBusy] = useState(false)
   const load = useCallback(() => get('/my/adoptions').then(setList), [])
   useEffect(() => { load() }, [load])
+
+  const answerPlan = async (a, planId, accept) => {
+    let note = ''
+    if (!accept) {
+      note = window.prompt('请告诉农场你暂不接受的原因（农场将据此重新编排）：') || ''
+      if (note.trim() === '') return
+    }
+    setBusy(true)
+    try {
+      await post(`/projects/${a.project_id}/round-plans/${planId}/${accept ? 'confirm' : 'reject'}`, { note })
+      await load()
+    } catch (e) { alert(e.message) } finally { setBusy(false) }
+  }
 
   return (
     <>
       <h1>🎁 我的认养与权益兑现</h1>
-      <p className="muted">每一份认养的保底产量、分批发货、赔付折算与满意度回访都在这里核对——看自己的权益是否被公平兑现。</p>
+      <p className="muted">同一批次成熟不均时农场会分轮发货并说明每轮重量与口感差异；确认后可看到已发、待发与权益余额，全部送达自动归档。</p>
       {list.length === 0 ? <Empty text="还没有认养记录，去首页挑一块好地吧" /> : (
         <div className="grid">
           {list.map((a) => {
@@ -35,38 +49,81 @@ export default function MyAdoptions() {
                     <div className="small muted mt8">{a.farm_name} · 订单号 #{a.id} · {fmtMoney(a.amount)}</div>
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    {rf.fair
-                      ? <span className="badge-fair ok">✓ 权益已公平兑现</span>
-                      : rf.projected_fair
-                        ? <span className="badge-fair warn">⏳ 在途批次兑现中</span>
-                        : <span className="badge-fair warn">⚠ 保底权益存在缺口</span>}
+                    {a.rights_archive?.status === 'archived'
+                      ? <span className="badge-fair ok">📦 权益已归档</span>
+                      : rf.fair
+                        ? <span className="badge-fair ok">✓ 权益已公平兑现</span>
+                        : rf.projected_fair
+                          ? <span className="badge-fair warn">⏳ 在途批次兑现中</span>
+                          : <span className="badge-fair warn">⚠ 保底权益存在缺口</span>}
                     <div className="small muted mt8">{rf.stage}</div>
                   </div>
                 </div>
 
+                {a.rights_archive?.status === 'archived' && (
+                  <div className="small mt8" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '8px 12px', color: '#166534' }}>
+                    📦 {a.rights_archive.summary}
+                  </div>
+                )}
+
                 <div className="grid grid-4 mt16">
                   <Stat label="保底产量" value={fmtKg(rf.guarantee_kg)} />
-                  <Stat label="已收到" value={fmtKg(rf.shipped_kg)} cls="blue" />
-                  <Stat label="在途/待发" value={fmtKg(rf.planned_kg)} cls="amber" />
-                  <Stat label="赔付折算" value={fmtKg(rf.compensated_kg_equiv)} cls={rf.compensated_kg_equiv > 0 ? 'red' : ''} />
+                  <Stat label="已发（已出库/送达）" value={fmtKg(rf.shipped_kg)} cls="blue" />
+                  <Stat label="待发（已确认排产）" value={fmtKg(rf.planned_kg)} cls="amber" />
+                  <Stat label="权益余额（欠量）" value={fmtKg(a.rights_archive ? a.rights_archive.balance_kg : rf.shortage_kg)}
+                        cls={(a.rights_archive ? a.rights_archive.balance_kg : rf.shortage_kg) > 0 ? 'red' : 'green'} />
+                </div>
+                <div className="small muted mt8">
+                  赔付折算 {fmtKg(rf.compensated_kg_equiv)}（¥{rf.compensated_amount.toFixed(2)}）
+                  {a.rights_archive && <> · 余额最近同步 {fmtDate(a.rights_archive.synced_at)}</>}
                 </div>
 
                 <div className="grid grid-2 mt16">
                   <div>
-                    <h3>🚚 分批发货计划</h3>
+                    <h3>🚚 分轮发货 · 已发 / 待发</h3>
+                    {/* 待认养人确认的成熟度分轮方案 */}
+                    {(a.round_plans || []).filter(p => p.status === 'proposed').map((p) => (
+                      <div key={p.id} className="round-propose" style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                        <div className="row"><Tag cls="amber">待你确认</Tag><strong>成熟不均 · 拆 {(p.items || []).length} 轮发货</strong></div>
+                        <p className="small muted mt8">{p.reason}</p>
+                        <table>
+                          <thead><tr><th>轮次</th><th>预计日期</th><th>预计重量</th><th>口感差异</th></tr></thead>
+                          <tbody>
+                            {(p.items || []).map((it) => (
+                              <tr key={it.id}>
+                                <td>第{it.seq}轮</td>
+                                <td>{fmtDay(it.plan_date)}</td>
+                                <td>{it.est_weight_kg}kg</td>
+                                <td className="small">{it.taste_diff}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        <div className="row mt8">
+                          <button className="sm" disabled={busy} onClick={() => answerPlan(a, p.id, true)}>✓ 确认分轮方案</button>
+                          <button className="sm ghost" disabled={busy} onClick={() => answerPlan(a, p.id, false)}>暂不接受</button>
+                          <span className="spacer" />
+                          <span className="small muted">确认后生成物流计划并更新权益核算</span>
+                        </div>
+                      </div>
+                    ))}
                     <table>
-                      <thead><tr><th>批次</th><th>计划</th><th>规格/路线</th><th>状态</th></tr></thead>
+                      <thead><tr><th>批次</th><th>计划</th><th>重量/口感</th><th>状态</th></tr></thead>
                       <tbody>
                         {(a.shipments || []).map((s) => (
                           <tr key={s.id || s.seq}>
-                            <td>第{s.seq}批<br /><span className="small muted">{s.weight_kg}kg</span></td>
+                            <td>第{s.seq}轮<br /><span className="small muted">{s.weight_kg}kg</span></td>
                             <td>{fmtDay(s.plan_date)}</td>
-                            <td className="small">{s.pack_spec}<br /><span className="muted">{s.cold_route}</span><br />
+                            <td className="small">{s.pack_spec}
+                              {s.taste_diff && <div style={{ color: '#92400e' }}>👅 {s.taste_diff}</div>}
+                              <span className="muted">{s.cold_route}</span><br />
                               {s.tracking_no && <span className="muted">运单 {s.tracking_no}</span>}</td>
                             <td><ShipFlow status={s.status} /></td>
                           </tr>
                         ))}
-                        {(!a.shipments || a.shipments.length === 0) && <tr><td colSpan="4" className="muted">尚未排产</td></tr>}
+                        {(!a.shipments || a.shipments.length === 0) && (
+                          <tr><td colSpan="4" className="muted">尚未排产，确认分轮方案后在此查看已发/待发</td></tr>
+                        )}
                       </tbody>
                     </table>
                   </div>

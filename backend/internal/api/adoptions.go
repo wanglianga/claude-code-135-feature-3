@@ -147,15 +147,24 @@ func (s *Server) handleMyAdoptions(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		aid, _ := row["id"].(int64)
 		ships, _ := s.queryRows(r.Context(),
-			`SELECT seq, plan_date, pack_spec, cold_route, weight_kg, status, tracking_no,
-			        shipped_at, delivered_at, bad_fruit_rate
-			 FROM shipments WHERE adoption_id=$1 ORDER BY seq`, aid)
+			`SELECT sh.id, sh.seq, sh.plan_date, sh.pack_spec, sh.cold_route, sh.weight_kg, sh.status, sh.tracking_no,
+			        sh.shipped_at, sh.delivered_at, sh.bad_fruit_rate,
+			        (SELECT taste_diff FROM shipment_round_items ri WHERE ri.id=sh.round_item_id) AS taste_diff
+			 FROM shipments sh WHERE adoption_id=$1 ORDER BY sh.seq`, aid)
 		comps, _ := s.queryRows(r.Context(),
 			`SELECT c.amount, c.kind, c.status, c.note, c.paid_at, i.title AS incident_title
 			 FROM compensations c LEFT JOIN incidents i ON i.id=c.incident_id
 			 WHERE c.adoption_id=$1 ORDER BY c.id`, aid)
 		cbs, _ := s.queryRows(r.Context(),
 			`SELECT * FROM callbacks WHERE adoption_id=$1`, aid)
+		roundPlans, _ := s.queryRows(r.Context(), `
+			SELECT rp.id, rp.status, rp.reason, rp.confirmed_at,
+			       (SELECT json_agg(ri ORDER BY ri.seq)
+			          FROM shipment_round_items ri WHERE ri.plan_id=rp.id) AS items
+			FROM shipment_round_plans rp WHERE rp.adoption_id=$1 ORDER BY rp.id`, aid)
+		// 发货/赔付变化后实时重算权益余额（已发/待发/权益余额），全部送达自动归档
+		_ = s.recomputeRightsArchive(r.Context(), aid)
+		archive, _ := s.queryOne(r.Context(), `SELECT * FROM rights_archives WHERE adoption_id=$1`, aid)
 
 		var shipped, plannedKg float64
 		allDelivered := len(ships) > 0
@@ -225,6 +234,8 @@ func (s *Server) handleMyAdoptions(w http.ResponseWriter, r *http.Request) {
 		row["shipments"] = ships
 		row["compensations"] = comps
 		row["callbacks"] = cbs
+		row["round_plans"] = roundPlans
+		row["rights_archive"] = archive
 		row["rights_fulfillment"] = fulfilled
 		result = append(result, row)
 	}

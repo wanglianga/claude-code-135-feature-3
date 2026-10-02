@@ -80,8 +80,10 @@ export default function ProjectDetail() {
             <button className="sm" onClick={() => setAction('log')}>📷 记农事/灾害</button>
             <button className="sm" onClick={() => setAction('check')}>🔬 成熟度抽检</button>
             <button className="sm" onClick={() => setAction('harvest')}>🧺 安排采摘</button>
+            <button className="sm" onClick={() => setAction('harvest_plan')}>🧑‍🌾 采摘计划(同步包装组)</button>
             <button className="sm" onClick={() => setAction('sorting')}>📦 登记分拣</button>
             <button className="sm" onClick={() => setAction('shipment')}>🚚 编排发货</button>
+            <button className="sm amber" onClick={() => setAction('round_plan')}>🍎 成熟度分批发货</button>
             <button className="sm" onClick={() => setAction('cost')}>💰 地块记账</button>
             <button className="sm ghost" onClick={() => setAction('live')}>🎥 开直播</button>
             {p.status !== 'completed' && <button className="sm amber" onClick={() => setAction('settle')}>✅ 季末结算</button>}
@@ -144,7 +146,67 @@ export default function ProjectDetail() {
 
         {tab === 'harvest' && (
           <div>
-            <h3>🧺 采摘任务</h3>
+            <h3>🍎 成熟度分批发货方案（同一批次成熟不均）</h3>
+            {(d.round_plans || []).length === 0 ? <Empty text="暂无分轮方案；成熟不均时农场可按成熟度拆多轮并说明每轮重量与口感差异" /> : (
+              <div className="grid">
+                {d.round_plans.map((rp) => (
+                  <div key={rp.id} className="card" style={{ margin: 0, background: rp.status === 'proposed' ? '#fffbeb' : rp.status === 'confirmed' ? '#f0fdf4' : '#f9fafb' }}>
+                    <div className="row">
+                      <Tag cls={rp.status === 'proposed' ? 'amber' : rp.status === 'confirmed' ? 'green' : 'gray'}>
+                        {({ proposed: '待认养人确认', confirmed: '认养人已确认', rejected: '认养人未接受', archived: '已归档' })[rp.status]}
+                      </Tag>
+                      <strong>订单 #{rp.adoption_id} · {rp.recipient_name}</strong>
+                      <span className="spacer" />
+                      <span className="small muted">{(rp.items || []).length} 轮 · {rp.confirmed_name ? '确认人 ' + rp.confirmed_name : '等待确认'}</span>
+                    </div>
+                    <p className="small muted mt8">{rp.reason}</p>
+                    <table>
+                      <thead><tr><th>轮次</th><th>计划日期</th><th>预计重量</th><th>口感差异</th><th>物流状态</th></tr></thead>
+                      <tbody>
+                        {(rp.items || []).map((it) => (
+                          <tr key={it.id}>
+                            <td>第{it.seq}轮</td>
+                            <td>{fmtDay(it.plan_date)}</td>
+                            <td>{it.est_weight_kg}kg</td>
+                            <td className="small">{it.taste_diff}</td>
+                            <td>{it.shipment_status ? <ShipFlow status={it.shipment_status} /> : <Tag cls="gray">未排产</Tag>}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3 className="mt16">🧑‍🌾 采摘计划（农场安排下一次采摘工人 → 同步包装组确认）</h3>
+            <table>
+              <thead><tr><th>对应轮次</th><th>计划日期</th><th>目标重量</th><th>采摘工</th><th>用工/采摘说明</th><th>状态</th><th>包装组</th>
+                {user && (user.role === 'packer' || user.role === 'admin') && <th>操作</th>}</tr></thead>
+              <tbody>
+                {(d.harvest_plans || []).map((hp) => (
+                  <tr key={hp.id}>
+                    <td>{hp.round_seq ? `第${hp.round_seq}轮` : '—'}</td>
+                    <td>{fmtDay(hp.planned_date)}</td>
+                    <td>{fmtKg(hp.target_kg)}</td>
+                    <td>{hp.picker_name || '未分配'}</td>
+                    <td className="small">{hp.worker_note}<br /><span className="muted">{hp.fruit_note}</span></td>
+                    <td><Tag cls={hp.status === 'planned' ? 'amber' : hp.status === 'confirmed' ? 'green' : 'gray'}>
+                      {({ planned: '待包装组确认', confirmed: '包装组已确认', done: '已完成', canceled: '已取消' })[hp.status]}
+                    </Tag></td>
+                    <td className="small">{hp.packer_name ? <>{hp.packer_name}<br /><span className="muted">{hp.packer_note}</span></> : '—'}</td>
+                    <td>
+                      {hp.status === 'planned' && (user.role === 'packer' || user.role === 'admin') && (
+                        <button className="sm ghost" onClick={() => setAction({ type: 'harvest_plan_confirm', plan: hp })}>包装组确认</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {(d.harvest_plans || []).length === 0 && <tr><td colSpan="8"><Empty text="暂无采摘计划" /></td></tr>}
+              </tbody>
+            </table>
+
+            <h3 className="mt16">🧺 采摘任务（包装组确认后生成）</h3>
             <table>
               <thead><tr><th>计划日期</th><th>优先级</th><th>采摘工</th><th>目标</th><th>实际</th><th>坏果率</th><th>状态</th>
                   {user && (user.role === 'picker' || canOperate) && <th>操作</th>}</tr></thead>
@@ -284,8 +346,10 @@ function ActionModal({ kind, projectId, onClose, onDone }) {
   const simple = typeof kind === 'string'
   const type = simple ? kind : kind.type
   const titles = {
-    log: '记录农事 / 灾害', check: '成熟度抽检', harvest: '安排采摘任务', sorting: '登记分拣',
-    shipment: '编排序批发货', cost: '地块记账', live: '创建直播', settle: '季末结算',
+    log: '记录农事 / 灾害', check: '成熟度抽检', harvest: '安排采摘任务',
+    harvest_plan: '安排采摘计划（同步包装组）', sorting: '登记分拣',
+    shipment: '编排序批发货', round_plan: '成熟度分批发货方案',
+    cost: '地块记账', live: '创建直播', settle: '季末结算',
   }
   const [f, setF] = useState({})
   const set = (k, v) => setF({ ...f, [k]: v })
@@ -366,6 +430,15 @@ function ActionModal({ kind, projectId, onClose, onDone }) {
       {type === 'ship_advance' && (
         <ShipAdvanceForm ship={kind.ship} />
       )}
+      {type === 'round_plan' && (
+        <RoundPlanForm projectId={projectId} onDone={onDone} onClose={onClose} />
+      )}
+      {type === 'harvest_plan' && (
+        <HarvestPlanForm projectId={projectId} onDone={onDone} onClose={onClose} />
+      )}
+      {type === 'harvest_plan_confirm' && (
+        <HarvestPlanConfirmForm plan={kind.plan} projectId={projectId} onDone={onDone} onClose={onClose} />
+      )}
       {type === 'cost' && (
         <div className="grid grid-2">
           <div><label>成本类型</label>
@@ -394,7 +467,8 @@ function ActionModal({ kind, projectId, onClose, onDone }) {
           <textarea rows="4" onChange={(e) => set('summary', e.target.value)} placeholder="如：本季受冰雹影响…建议增设防雹网、上线净重磅识模板…" />
         </>
       )}
-      {type !== 'ship_advance' && <div className="mt16"><button onClick={submit}>提交</button></div>}
+      {!['ship_advance', 'round_plan', 'harvest_plan', 'harvest_plan_confirm'].includes(type)
+        && <div className="mt16"><button onClick={submit}>提交</button></div>}
     </Modal>
   )
 }
@@ -429,4 +503,122 @@ async function dispatchAction(type, projectId, f, extra) {
     shipment: 'shipments', cost: 'costs', live: 'live', settle: 'settle',
   }
   return post(`/projects/${projectId}/${paths[type]}`, f)
+}
+
+// ---------- 成熟度分批发货方案 ----------
+function RoundPlanForm({ projectId, onDone, onClose }) {
+  const toast = useToast()
+  const [adopts, setAdopts] = useState([])
+  const [adoptionId, setAdoptionId] = useState('')
+  const [reason, setReason] = useState('')
+  const [rounds, setRounds] = useState([
+    { plan_date: '', est_weight_kg: '', taste_diff: '', pack_spec: '', cold_route: '' },
+    { plan_date: '', est_weight_kg: '', taste_diff: '', pack_spec: '', cold_route: '' },
+  ])
+  React.useEffect(() => {
+    get(`/adoptions?project_id=${projectId}`).then((xs) => {
+      setAdopts(xs)
+      if (xs.length) setAdoptionId(xs[0].id)
+    }).catch(() => {})
+  }, [projectId])
+  const setR = (i, k, v) => setRounds(rounds.map((r, j) => (j === i ? { ...r, [k]: v } : r)))
+  const submit = async () => {
+    if (!adoptionId) return toast('请选择认养订单', true)
+    const payload = {
+      adoption_id: Number(adoptionId), reason,
+      rounds: rounds.map((r, i) => ({
+        seq: i + 1, plan_date: r.plan_date, est_weight_kg: Number(r.est_weight_kg),
+        taste_diff: r.taste_diff, pack_spec: r.pack_spec, cold_route: r.cold_route,
+      })),
+    }
+    try {
+      await post(`/projects/${projectId}/round-plans`, payload)
+      toast('分轮方案已发起，等待认养人确认')
+      onDone(); onClose()
+    } catch (e) { toast(e.message, true) }
+  }
+  return (
+    <>
+      <p className="muted small">同一认养批次成熟不均时，把发货拆成多轮，逐轮说明预计重量与口感差异；认养人确认后自动生成各轮物流计划并更新权益核算。</p>
+      <label>认养订单</label>
+      <select value={adoptionId} onChange={(e) => setAdoptionId(e.target.value)}>
+        {adopts.map((a) => <option key={a.id} value={a.id}>#{a.id} {a.recipient_name} · {a.user_name}</option>)}
+      </select>
+      <label>成熟不均说明</label>
+      <textarea rows="2" value={reason} onChange={(e) => setReason(e.target.value)}
+        placeholder="如：外围向阳果先熟，内膛果晚熟约10天，为避免早采风味不足分两轮发货" />
+      {rounds.map((r, i) => (
+        <div key={i} className="card" style={{ margin: '8px 0', background: '#f9fafb' }}>
+          <strong>第 {i + 1} 轮</strong>
+          <div className="grid grid-2">
+            <div><label>计划日期</label><input type="date" value={r.plan_date} onChange={(e) => setR(i, 'plan_date', e.target.value)} /></div>
+            <div><label>预计重量 kg</label><input type="number" value={r.est_weight_kg} onChange={(e) => setR(i, 'est_weight_kg', e.target.value)} /></div>
+          </div>
+          <label>口感差异（必填）</label>
+          <input value={r.taste_diff} onChange={(e) => setR(i, 'taste_diff', e.target.value)}
+            placeholder="如：糖度14.6%脆甜多汁到手即食 / 糖度13.2%酸度略高建议后熟3-5天" />
+          <label>包装规格</label><input value={r.pack_spec} onChange={(e) => setR(i, 'pack_spec', e.target.value)} />
+          <label>冷链路线</label><input value={r.cold_route} onChange={(e) => setR(i, 'cold_route', e.target.value)} />
+          {rounds.length > 1 && <button className="sm ghost mt8" onClick={() => setRounds(rounds.filter((_, j) => j !== i))}>删除本轮</button>}
+        </div>
+      ))}
+      <button className="sm ghost" onClick={() => setRounds([...rounds, { plan_date: '', est_weight_kg: '', taste_diff: '', pack_spec: '', cold_route: '' }])}>＋ 增加一轮</button>
+      <div className="mt16"><button onClick={submit}>发起方案给认养人确认</button></div>
+    </>
+  )
+}
+
+// ---------- 采摘计划（同步包装组） ----------
+function HarvestPlanForm({ projectId, onDone, onClose }) {
+  const toast = useToast()
+  const [f, setF] = useState({ round_seq: '', picker_id: '', planned_date: '', target_kg: '', worker_note: '', fruit_note: '' })
+  const set = (k, v) => setF({ ...f, [k]: v })
+  const submit = async () => {
+    const payload = { ...f }
+    if (payload.round_seq) payload.round_seq = Number(payload.round_seq)
+    if (payload.picker_id) payload.picker_id = Number(payload.picker_id)
+    payload.target_kg = Number(payload.target_kg)
+    try {
+      await post(`/projects/${projectId}/harvest-plans`, payload)
+      toast('采摘计划已安排并同步包装组确认')
+      onDone(); onClose()
+    } catch (e) { toast(e.message, true) }
+  }
+  return (
+    <>
+      <p className="muted small">据分轮方案安排下一次采摘工人；计划同步给包装组，包装组确认箱材规格后生成采摘任务。</p>
+      <div className="grid grid-2">
+        <div><label>为第几轮备货（可空）</label><input type="number" value={f.round_seq} onChange={(e) => set('round_seq', e.target.value)} /></div>
+        <div><label>采摘工/组长 ID</label><input type="number" value={f.picker_id} onChange={(e) => set('picker_id', e.target.value)} placeholder="如 4" /></div>
+        <div><label>计划日期</label><input type="date" value={f.planned_date} onChange={(e) => set('planned_date', e.target.value)} /></div>
+        <div><label>目标重量 kg</label><input type="number" value={f.target_kg} onChange={(e) => set('target_kg', e.target.value)} /></div>
+      </div>
+      <label>用工安排</label><input value={f.worker_note} onChange={(e) => set('worker_note', e.target.value)} placeholder="人数/时段/轻采防碰压等" />
+      <label>采摘对象与成熟度门槛</label><input value={f.fruit_note} onChange={(e) => set('fruit_note', e.target.value)} placeholder="如：只采内膛晚熟果，糖度≥13%，雹伤果转加工" />
+      <div className="mt16"><button onClick={submit}>提交并同步包装组</button></div>
+    </>
+  )
+}
+
+// ---------- 包装组确认采摘计划 ----------
+function HarvestPlanConfirmForm({ plan, projectId, onDone, onClose }) {
+  const toast = useToast()
+  const [note, setNote] = useState('')
+  const submit = async () => {
+    try {
+      const r = await post(`/projects/${projectId}/harvest-plans/${plan.id}/confirm`, { note })
+      toast(`已确认，采摘任务 #${r.harvest_task_id} 已生成`)
+      onDone(); onClose()
+    } catch (e) { toast(e.message, true) }
+  }
+  return (
+    <>
+      <p className="muted">计划日期 <strong>{fmtDay(plan.planned_date)}</strong> · 目标 {fmtKg(plan.target_kg)} · 采摘工 {plan.picker_name || '未分配'}</p>
+      <p className="small">{plan.worker_note}</p>
+      <p className="small muted">{plan.fruit_note}</p>
+      <label>包装组核对意见（箱材/规格/隔板网套准备情况）</label>
+      <textarea rows="3" value={note} onChange={(e) => setNote(e.target.value)} placeholder="如：中果15枚装隔板、小果20枚装网套已备齐，可按计划采摘" />
+      <div className="mt16"><button onClick={submit}>确认采摘计划并生成采摘任务</button></div>
+    </>
+  )
 }

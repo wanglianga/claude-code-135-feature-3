@@ -360,6 +360,16 @@ func (s *Server) handleFarmDashboard(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN adoptions a ON a.id=sh.adoption_id
 		WHERE p.farm_id=$1 AND sh.status IN ('planned','picked','packed','shipped')
 		ORDER BY sh.plan_date, sh.seq`, farmID)
+	// 待包装组确认的采摘计划（农场据分轮方案安排的下一次采摘工人）
+	pendingHarvestPlans, _ := s.queryRows(ctx, `
+		SELECT hp.id, hp.status, hp.planned_date, hp.target_kg, hp.round_seq,
+		       hp.worker_note, hp.fruit_note, p.id AS project_id, p.title AS project_title, p.batch_no,
+		       pu.name AS picker_name
+		FROM harvest_plans hp
+		JOIN projects p ON p.id=hp.project_id
+		LEFT JOIN users pu ON pu.id=hp.picker_id
+		WHERE p.farm_id=$1 AND hp.status='planned'
+		ORDER BY hp.planned_date, hp.id`, farmID)
 
 	stats := map[string]interface{}{}
 	var (
@@ -382,12 +392,13 @@ func (s *Server) handleFarmDashboard(w http.ResponseWriter, r *http.Request) {
 	stats["renew_rate"] = vRenew
 
 	writeJSON(w, 200, map[string]interface{}{
-		"farm_id":          farmID,
-		"projects":         projects,
-		"plots":            plots,
-		"open_incidents":   openIncidents,
-		"active_shipments": todayShipments,
-		"stats":            stats,
+		"farm_id":               farmID,
+		"projects":              projects,
+		"plots":                 plots,
+		"open_incidents":        openIncidents,
+		"active_shipments":      todayShipments,
+		"pending_harvest_plans": pendingHarvestPlans,
+		"stats":                 stats,
 	})
 }
 

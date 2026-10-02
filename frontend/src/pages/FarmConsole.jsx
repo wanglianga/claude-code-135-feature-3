@@ -87,6 +87,29 @@ export default function FarmConsole() {
       </div>
 
       <div className="card">
+        <div className="section-title">📋 待包装组确认的采摘计划（据分轮方案安排的下一次采摘工人）</div>
+        <table>
+          <thead><tr><th>项目/批次</th><th>对应轮次</th><th>计划日期</th><th>目标重量</th><th>采摘工</th><th>用工/采摘说明</th><th></th></tr></thead>
+          <tbody>
+            {(d.pending_harvest_plans || []).map((hp) => (
+              <tr key={hp.id}>
+                <td className="small">{hp.project_title}<br /><span className="muted">{hp.batch_no}</span></td>
+                <td>{hp.round_seq ? `第${hp.round_seq}轮` : '—'}</td>
+                <td>{fmtDay(hp.planned_date)}</td>
+                <td>{fmtKg(hp.target_kg)}</td>
+                <td>{hp.picker_name || '未分配'}</td>
+                <td className="small muted">{hp.worker_note}{hp.fruit_note ? ` · ${hp.fruit_note}` : ''}</td>
+                <td><button className="sm ghost" onClick={() => nav(`/projects/${hp.project_id}`)}>去确认</button></td>
+              </tr>
+            ))}
+            {(d.pending_harvest_plans || []).length === 0 && (
+              <tr><td colSpan="7"><Empty text="暂无待包装组确认的采摘计划" /></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
         <div className="section-title">🚚 待办发货（按成熟度与订单优先级排产）</div>
         <table>
           <thead><tr><th>项目</th><th>批次</th><th>计划日期</th><th>收货人</th><th>冷链路线</th><th>状态</th></tr></thead>

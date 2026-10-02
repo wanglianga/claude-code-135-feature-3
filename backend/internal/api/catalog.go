@@ -406,6 +406,29 @@ func (s *Server) projectDetail(w http.ResponseWriter, r *http.Request, id int64)
 		`SELECT * FROM settlements WHERE project_id=$1`, id)
 	live, _ := s.queryRows(ctx,
 		`SELECT * FROM live_streams WHERE project_id=$1 ORDER BY starts_at DESC`, id)
+	roundPlans, _ := s.queryRows(ctx, `
+		SELECT rp.*, a.recipient_name, au.name AS adopter_name, cu.name AS confirmed_name
+		FROM shipment_round_plans rp
+		JOIN adoptions a ON a.id=rp.adoption_id
+		JOIN users au ON au.id=a.user_id
+		LEFT JOIN users cu ON cu.id=rp.confirmed_by
+		WHERE rp.project_id=$1 ORDER BY rp.id`, id)
+	for _, rp := range roundPlans {
+		pid, _ := rp["id"].(int64)
+		items, _ := s.queryRows(ctx, `
+			SELECT ri.*, sh.status AS shipment_status, sh.tracking_no
+			FROM shipment_round_items ri
+			LEFT JOIN shipments sh ON sh.id=ri.shipment_id
+			WHERE ri.plan_id=$1 ORDER BY ri.seq`, pid)
+		rp["items"] = items
+	}
+	harvestPlans, _ := s.queryRows(ctx, `
+		SELECT hp.*, pu.name AS picker_name, ku.name AS packer_name, cu.name AS creator_name
+		FROM harvest_plans hp
+		LEFT JOIN users pu ON pu.id=hp.picker_id
+		LEFT JOIN users ku ON ku.id=hp.packer_id
+		LEFT JOIN users cu ON cu.id=hp.created_by
+		WHERE hp.project_id=$1 ORDER BY hp.id`, id)
 	var settlement interface{}
 	if len(settlements) > 0 {
 		settlement = settlements[0]
@@ -434,6 +457,8 @@ func (s *Server) projectDetail(w http.ResponseWriter, r *http.Request, id int64)
 		"charity":          charity,
 		"group_buys":       groupBuys,
 		"live_streams":     live,
+		"round_plans":      roundPlans,
+		"harvest_plans":    harvestPlans,
 		"settlement":       settlement,
 		"sum_harvested":    harvested,
 		"sum_shipped":      shipped,

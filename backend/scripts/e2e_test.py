@@ -96,6 +96,109 @@ check("未发货订单改址成功并建工单", st == 200 and r["ok"] and r["in
 st, r = call("POST", "/api/adoptions/1/address", T["adopter"], {"address": "x路1号"})
 check("已有发出批次改址被拦截", st == 409, r)
 
+# ---- 成熟度分批发货（同一批次成熟不均，拆多轮并说明每轮重量/口感差异）----
+# 种子数据：陈曦订单1为“已确认两轮方案”（首批已送达、第二批待发）；吴琳订单3为“待确认方案”
+st, p1 = call("GET", "/api/projects/1")
+check("项目详情含分轮方案与采摘计划",
+      len(p1["round_plans"]) >= 2 and len(p1["harvest_plans"]) >= 2,
+      {"rounds": len(p1["round_plans"]), "plans": len(p1["harvest_plans"])})
+chen_plan = next(x for x in p1["round_plans"] if x["adoption_id"] == 1)
+check("陈曦方案已确认且含每轮口感差异",
+      chen_plan["status"] == "confirmed" and len(chen_plan["items"]) == 2
+      and all(it["taste_diff"] for it in chen_plan["items"]), chen_plan)
+
+st, mine = call("GET", "/api/my/adoptions", T["adopter"])
+apple = next(a for a in mine if a["kind"] == "apple")
+ra = apple["rights_archive"]
+print("   陈曦权益归档:", ra)
+check("运单携带该轮口感差异", any(s.get("taste_diff") for s in apple["shipments"]), apple["shipments"])
+check("权益余额：已发12/待发8/余额0/履约中",
+      ra and ra["shipped_kg"] == 12 and ra["pending_kg"] == 8
+      and ra["balance_kg"] == 0 and ra["status"] == "active", ra)
+
+# 非认养人不能确认他人方案
+st, r = call("POST", "/api/projects/1/round-plans/2/confirm", T["adopter"], {})
+check("非本人不能确认分轮方案", st == 403, r)
+# 认养人（吴琳）确认两轮方案 -> 同步生成物流计划 + 更新权益核算
+st, p2 = call("POST", "/api/projects/1/round-plans/2/confirm", T["adopter2"], {})
+check("认养人确认分轮方案", st == 200 and p2["status"] == "confirmed" and len(p2["items"]) == 2, p2)
+check("确认后各轮生成 planned 物流计划",
+      all(it["shipment_id"] and it["shipment_status"] == "planned" for it in p2["items"]), p2)
+st, r = call("POST", "/api/projects/1/round-plans/2/confirm", T["adopter2"], {})
+check("重复确认被拒", st == 409, r)
+st, rights = call("GET", "/api/my/rights", T["adopter2"])
+wu_rights = next(x for x in rights if x["adoption_id"] == 3)["rights"]
+print("   吴琳权益余额(确认后排产):", wu_rights)
+check("权益余额同步：保底200/待发200/余额0",
+      wu_rights["guarantee_kg"] == 200 and wu_rights["pending_kg"] == 200
+      and wu_rights["balance_kg"] == 0 and wu_rights["status"] == "active", wu_rights)
+
+# 采摘计划：农场安排 -> 同步包装组 -> 包装组确认后生成采摘任务
+st, dash0 = call("GET", "/api/farm/dashboard", T["farmer"])
+check("看板列出待包装组确认的采摘计划(第1轮/赵秀兰)",
+      any(hp["round_seq"] == 1 and hp["picker_name"] and hp["project_id"] == 1
+          for hp in dash0.get("pending_harvest_plans", [])),
+      dash0.get("pending_harvest_plans"))
+st, r = call("POST", "/api/projects/1/harvest-plans/2/confirm", T["adopter"], {"note": "x"})
+check("非包装组不能确认采摘计划", st == 403, r)
+st, r = call("POST", "/api/projects/1/harvest-plans/2/confirm", T["farmer"], {"note": "x"})
+check("安排采摘计划的农场也不能自行确认（须包装组确认）", st == 403, r)
+st, hp = call("POST", "/api/projects/1/harvest-plans/2/confirm", T["packer"],
+              {"note": "中果隔板、小果网套已备齐，可按计划采摘"})
+check("包装组确认采摘计划并生成采摘任务",
+      st == 200 and hp["status"] == "confirmed" and hp["harvest_task_id"], hp)
+st, r = call("POST", "/api/projects/1/harvest-plans", T["logistics"],
+             {"planned_date": "2026-11-05", "target_kg": 300})
+check("非农场方不能安排采摘计划", st == 403, r)
+st, r = call("POST", "/api/projects/1/harvest-plans", T["farmer"],
+             {"round_seq": 2, "picker_id": 4, "planned_date": "2026-11-05", "target_kg": 300,
+              "worker_note": "安排4人采内膛果", "fruit_note": "糖度≥13%"})
+check("农场安排下一次采摘计划(同步包装组)", st == 201 and r["status"] == "planned", r)
+
+# 农场新拟分轮方案：校验 / 重复拦截 / 认养人拒绝并入工单
+st, r = call("POST", "/api/projects/1/round-plans", T["adopter"], {"adoption_id": 3, "rounds": []})
+check("认养人不能编排分轮方案", st == 403, r)
+st, r = call("POST", "/api/projects/1/round-plans", T["farmer"], {
+    "adoption_id": 3, "rounds": [{"seq": 1, "plan_date": "2026-11-10", "est_weight_kg": 10, "taste_diff": ""}]})
+check("每轮必须说明口感差异", st == 400, r)
+st, r = call("POST", "/api/projects/1/round-plans", T["farmer"], {
+    "adoption_id": 3, "reason": "内膛果继续晚熟，追加一轮",
+    "rounds": [
+        {"seq": 1, "plan_date": "2026-11-10", "est_weight_kg": 60, "taste_diff": "晚熟果，建议后熟5天", "pack_spec": "中果", "cold_route": "烟台-杭州冷链"},
+        {"seq": 2, "plan_date": "2026-11-15", "est_weight_kg": 40, "taste_diff": "末轮小果，甜度回升", "pack_spec": "小果", "cold_route": "烟台-杭州冷链"}]})
+check("农场拟新分轮方案", st == 201 and r["status"] == "proposed" and len(r["items"]) == 2, r)
+new_pid = r["id"]
+st, r = call("POST", "/api/projects/1/round-plans", T["farmer"], {
+    "adoption_id": 3, "rounds": [{"seq": 1, "plan_date": "2026-11-20", "est_weight_kg": 10, "taste_diff": "x"}]})
+check("已有待确认方案时禁止重复发起", st == 409, r)
+st, r = call("POST", f"/api/projects/1/round-plans/{new_pid}/reject", T["adopter2"],
+             {"note": "11月中旬出差，希望提前合并发货"})
+check("认养人拒绝方案并生成配送争议工单", st == 200 and r["status"] == "rejected", r)
+st, p1 = call("GET", "/api/projects/1")
+check("拒绝原因进入同一批次工单",
+      any(i["kind"] == "delivery_dispute" for i in p1["incidents"]), p1["incidents"])
+
+# 吴琳两轮（120kg+80kg）走完物流 -> 订单完成 -> 权益归档
+st, mine = call("GET", "/api/my/adoptions", T["adopter2"])
+wu_apple = next(a for a in mine if a["kind"] == "apple" and a["id"] == 3)
+wu_ships = sorted(wu_apple["shipments"], key=lambda s: s["seq"])
+check("确认方案后订单含两轮待发运单",
+      len(wu_ships) == 2 and wu_ships[0]["weight_kg"] == 120 and wu_ships[1]["weight_kg"] == 80, wu_ships)
+for sh in wu_ships:
+    sid = sh["id"]
+    for who, st_ in ((T["farmer"], "picked"), (T["farmer"], "packed"),
+                     (T["logistics"], "shipped"), (T["logistics"], "delivered")):
+        st, r = call("POST", f"/api/projects/1/shipments/{sid}/advance", who, {"status": st_})
+        assert st == 200, (st_, r)
+st, ad = call("GET", "/api/adoptions/3", T["adopter2"])
+check("两轮全部送达后订单自动完成", ad["status"] == "completed", ad)
+st, rights = call("GET", "/api/my/rights", T["adopter2"])
+wu_arch = next(x for x in rights if x["adoption_id"] == 3)["rights"]
+print("   吴琳权益归档:", wu_arch)
+check("分批发货完成后权益归档（已发200/待发0/余额0）",
+      wu_arch["status"] == "archived" and wu_arch["shipped_kg"] == 200
+      and wu_arch["pending_kg"] == 0 and wu_arch["balance_kg"] == 0, wu_arch)
+
 # ---- 农场端：灾害日志自动建工单 ----
 st, r = call("POST", "/api/projects/5/logs", T["farmer"], {
     "log_type": "disaster", "title": "暖棚短时大风掀膜",
@@ -240,6 +343,8 @@ check("地块平均满意度计算", led["avg_satisfaction"] >= 4, led["avg_sati
 st, dash = call("GET", "/api/farm/dashboard", T["farmer"])
 check("农场看板含项目/地块/工单/发货",
       all(k in dash for k in ["projects", "plots", "open_incidents", "active_shipments", "stats"]))
+check("看板含待包装组确认采摘计划字段",
+      "pending_harvest_plans" in dash, dash.keys())
 check("看板统计销售额", dash["stats"]["total_sales"] > 0, dash["stats"])
 st, r = call("GET", "/api/admin/overview", T["adopter"])
 check("非管理员禁止平台总览", st == 403)

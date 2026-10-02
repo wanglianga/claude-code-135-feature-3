@@ -274,6 +274,12 @@ func (s *Server) handleCompensationByID(w http.ResponseWriter, r *http.Request) 
 		incID, u.ID, u.Role,
 		fmt.Sprintf("赔付 ¥%.2f（%s）%s", amount, kind, asString(in["note"])))
 	row, _ := s.queryOne(ctx, `SELECT * FROM compensations WHERE id=$1`, cid)
+	// 赔付到账后同步刷新认养人权益余额
+	if aid, ok := asID(adoptionID); ok && aid != 0 {
+		if e := s.recomputeRightsArchive(ctx, aid); e != nil {
+			fmt.Println("recompute rights error:", e)
+		}
+	}
 	writeJSON(w, 201, row)
 }
 
